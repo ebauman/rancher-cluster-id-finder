@@ -23,6 +23,7 @@ var (
 	configMapName      string
 	configMapNamespace string
 	configMapKey       string
+	filePath           string
 	debug              bool
 
 	namespace string = "cattle-fleet-system"
@@ -49,6 +50,7 @@ func init() {
 	flag.StringVar(&configMapName, "configmap-name", "", "name of configmap to create")
 	flag.StringVar(&configMapNamespace, "configmap-namespace", "", "namespace in which to place configmap")
 	flag.StringVar(&configMapKey, "configmap-key", "", "key in configmap")
+	flag.StringVar(&filePath, "write-file", "", "path to write cluster id")
 	flag.BoolVar(&debug, "debug", false, "output debug logs")
 
 	flag.Parse()
@@ -181,6 +183,13 @@ func main() {
 		}
 
 		cm, err := clientset.CoreV1().ConfigMaps(configMapNamespace).Create(ctx, cm, metav1.CreateOptions{})
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	if filePath != "" {
+		err = os.WriteFile(filePath, []byte(rancherClusterID), 0666)
 		if err != nil {
 			panic(err)
 		}
