@@ -6,7 +6,7 @@ COPY . .
 
 RUN go get -d -v ./...
 
-RUN go build -v -o rcidf ./...
+RUN go build -v -o rcidf
 
 FROM gcr.io/distroless/base-debian11 AS run
 
