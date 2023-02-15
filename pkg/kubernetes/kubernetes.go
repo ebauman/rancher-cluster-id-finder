@@ -20,6 +20,7 @@ import (
 
 var (
 	namespace            = "cattle-fleet-system"
+	localNamespace       = "cattle-system"
 	fleetAgentSecretName = "fleet-agent"
 	b64                  = base64.StdEncoding
 
@@ -65,9 +66,16 @@ func buildKubeClient(kubeconfigFile string) (*kubernetes.Clientset, context.Cont
 }
 
 func (kc *Kubeclient) GetClusterID() (string, error) {
-	// first, let's check if the namespace we need is in existence (cattle-fleet-system)
+	// check to see if we're in the local cluster first
+	// this is indicated by an ingress called rancher in the cattle-system namespace
+	ing, err := kc.clientset.NetworkingV1().Ingresses(localNamespace).Get(kc.ctx, "rancher", metav1.GetOptions{})
+	if err == nil && ing != nil {
+		// this is the local cluster, just return "local"
+		return "local", nil
+	}
 
-	_, err := kc.clientset.CoreV1().Namespaces().Get(kc.ctx, namespace, metav1.GetOptions{})
+	// first, let's check if the namespace we need is in existence (cattle-fleet-system)
+	_, err = kc.clientset.CoreV1().Namespaces().Get(kc.ctx, namespace, metav1.GetOptions{})
 	if err != nil {
 		return "", err // _something_ went wrong, we don't really care what since it just means we can't go any further
 		// ( as opposed to detecting errors.IsNotFound() and handling that separately )
@@ -137,8 +145,15 @@ func (kc *Kubeclient) GetClusterID() (string, error) {
 }
 
 func (kc *Kubeclient) GetRancherURL() (string, error) {
+	// check if this is the local cluster
+	// local cluster is indicated when there is an ingress called rancher in the namespace cattle-system
+	// if so, return that ingress's hostname
+	ing, err := kc.clientset.NetworkingV1().Ingresses(localNamespace).Get(kc.ctx, "rancher", metav1.GetOptions{})
+	if err == nil && ing != nil {
+		return fmt.Sprintf("https://%s", ing.Spec.Rules[0].Host), nil
+	}
 	// first, let's check if the namespace we need is in existence
-	_, err := kc.clientset.CoreV1().Namespaces().Get(kc.ctx, namespace, metav1.GetOptions{})
+	_, err = kc.clientset.CoreV1().Namespaces().Get(kc.ctx, namespace, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
