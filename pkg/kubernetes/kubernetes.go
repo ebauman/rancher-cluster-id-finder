@@ -1,14 +1,12 @@
 package kubernetes
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
+	"strings"
+
 	"github.com/ebauman/rancher-cluster-id-finder/pkg/types"
-	"io/ioutil"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -17,7 +15,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"sort"
 )
 
 var (
@@ -84,61 +81,20 @@ func (kc *Kubeclient) GetClusterID() (string, error) {
 		// ( as opposed to detecting errors.IsNotFound() and handling that separately )
 	}
 
-	// we have the namespace, now let's get the secrets in that ns, but only the helm release kind
-	secrets, err := kc.clientset.CoreV1().Secrets(namespace).List(kc.ctx, metav1.ListOptions{})
+	// we have the namespace, grab the "fleet-agent" secret
+	secret, err := kc.clientset.CoreV1().Secrets(namespace).Get(kc.ctx, "fleet-agent", metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
 
-	var helmSecrets = []v1.Secret{}
-	for _, s := range secrets.Items {
-		if s.Type == "helm.sh/release.v1" {
-			helmSecrets = append(helmSecrets, s)
-		}
+	// now grab the annotation in the secret that contains the cluster id
+	annotations := secret.ObjectMeta.GetAnnotations()
+	val, ok := annotations["field.cattle.io/projectId"]
+	if !ok {
+		return "", err
 	}
 
-	// from these helm secrets, sort by name to get the most recent version
-	sort.Slice(helmSecrets, func(i, j int) bool {
-		return helmSecrets[i].Name > helmSecrets[j].Name
-	})
-
-	// now get the first item from that list, and pull out the helm secret data
-	// basically stealing this process from https://github.com/helm/helm/blob/4b18b19a5e0b11450b9dc92edc75bdd7891c1f4e/pkg/storage/driver/util.go
-	var rancherClusterID = ""
-	if data, ok := helmSecrets[0].Data["release"]; ok {
-		// take that data and base64 decode it
-
-		b, err := b64.DecodeString(string(data))
-		if err != nil {
-			return "", err
-		}
-
-		if len(b) > 3 && bytes.Equal(b[0:3], magicGzip) {
-
-			r, err := gzip.NewReader(bytes.NewReader(b))
-			if err != nil {
-				return "", err
-			}
-			defer r.Close()
-			b2, err := ioutil.ReadAll(r)
-			if err != nil {
-				return "", err
-			}
-			b = b2
-		}
-
-		var rls types.Release
-		if err := json.Unmarshal(b, &rls); err != nil {
-			return "", err
-		}
-
-		// now locate the rancher cluster id in that helm release data
-
-		rancherClusterID = rls.Config.Global.Fleet.ClusterLabels.ClusterName
-
-	} else {
-		return "", fmt.Errorf("couldn't find key release in secret")
-	}
+	rancherClusterID := strings.Split(val, ":")[0]
 
 	if rancherClusterID == "" {
 		return "", fmt.Errorf("rancher cluster id not found")
