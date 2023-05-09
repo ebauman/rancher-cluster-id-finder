@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"strings"
 
 	"github.com/ebauman/rancher-cluster-id-finder/pkg/types"
 	v1 "k8s.io/api/core/v1"
@@ -82,19 +81,17 @@ func (kc *Kubeclient) GetClusterID() (string, error) {
 	}
 
 	// we have the namespace, grab the "fleet-agent" secret
-	secret, err := kc.clientset.CoreV1().Secrets(namespace).Get(kc.ctx, "fleet-agent", metav1.GetOptions{})
+	configmap, err := kc.clientset.CoreV1().ConfigMaps(namespace).Get(kc.ctx, "fleet-agent", metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
 
 	// now grab the annotation in the secret that contains the cluster id
-	annotations := secret.ObjectMeta.GetAnnotations()
-	val, ok := annotations["field.cattle.io/projectId"]
+	labels := configmap.ObjectMeta.GetLabels()
+	rancherClusterID, ok := labels["management.cattle.io/cluster-name"]
 	if !ok {
 		return "", err
 	}
-
-	rancherClusterID := strings.Split(val, ":")[0]
 
 	if rancherClusterID == "" {
 		return "", fmt.Errorf("rancher cluster id not found")
