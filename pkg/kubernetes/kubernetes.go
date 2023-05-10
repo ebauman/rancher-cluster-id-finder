@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 
 	"github.com/ebauman/rancher-cluster-id-finder/pkg/types"
 	v1 "k8s.io/api/core/v1"
@@ -17,10 +18,11 @@ import (
 )
 
 var (
-	namespace            = "cattle-fleet-system"
-	localNamespace       = "cattle-system"
-	fleetAgentSecretName = "fleet-agent"
-	b64                  = base64.StdEncoding
+	namespace               = "cattle-fleet-system"
+	localNamespace          = "cattle-system"
+	fleetAgentSecretName    = "fleet-agent"
+	fleetAgentConfigMapName = "fleet-agent"
+	b64                     = base64.StdEncoding
 
 	magicGzip = []byte{0x1f, 0x8b, 0x08}
 )
@@ -81,7 +83,7 @@ func (kc *Kubeclient) GetClusterID() (string, error) {
 	}
 
 	// we have the namespace, grab the "fleet-agent" secret
-	configmap, err := kc.clientset.CoreV1().ConfigMaps(namespace).Get(kc.ctx, "fleet-agent", metav1.GetOptions{})
+	configmap, err := kc.clientset.CoreV1().ConfigMaps(namespace).Get(kc.ctx, fleetAgentConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -90,7 +92,20 @@ func (kc *Kubeclient) GetClusterID() (string, error) {
 	labels := configmap.ObjectMeta.GetLabels()
 	rancherClusterID, ok := labels["management.cattle.io/cluster-name"]
 	if !ok {
-		return "", err
+		// fall back to using the 'fleet-agent' secret
+		secret, err := kc.clientset.CoreV1().Secrets(namespace).Get(kc.ctx, fleetAgentSecretName, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+
+		// now grab the annotation in the secret that contains the cluster id
+		annotations := secret.ObjectMeta.GetAnnotations()
+		val, ok := annotations["field.cattle.io/projectId"]
+		if !ok {
+			return "", fmt.Errorf("rancher cluster id not found")
+		}
+
+		rancherClusterID = strings.Split(val, ":")[0]
 	}
 
 	if rancherClusterID == "" {
