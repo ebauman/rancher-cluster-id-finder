@@ -1,14 +1,12 @@
 package kubernetes
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
+	"strings"
+
 	"github.com/ebauman/rancher-cluster-id-finder/pkg/types"
-	"io/ioutil"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -17,14 +15,14 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"sort"
 )
 
 var (
-	namespace            = "cattle-fleet-system"
-	localNamespace       = "cattle-system"
-	fleetAgentSecretName = "fleet-agent"
-	b64                  = base64.StdEncoding
+	namespace               = "cattle-fleet-system"
+	localNamespace          = "cattle-system"
+	fleetAgentSecretName    = "fleet-agent"
+	fleetAgentConfigMapName = "fleet-agent"
+	b64                     = base64.StdEncoding
 
 	magicGzip = []byte{0x1f, 0x8b, 0x08}
 )
@@ -84,60 +82,30 @@ func (kc *Kubeclient) GetClusterID() (string, error) {
 		// ( as opposed to detecting errors.IsNotFound() and handling that separately )
 	}
 
-	// we have the namespace, now let's get the secrets in that ns, but only the helm release kind
-	secrets, err := kc.clientset.CoreV1().Secrets(namespace).List(kc.ctx, metav1.ListOptions{})
+	// we have the namespace, grab the "fleet-agent" secret
+	configmap, err := kc.clientset.CoreV1().ConfigMaps(namespace).Get(kc.ctx, fleetAgentConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
 
-	var helmSecrets = []v1.Secret{}
-	for _, s := range secrets.Items {
-		if s.Type == "helm.sh/release.v1" {
-			helmSecrets = append(helmSecrets, s)
-		}
-	}
-
-	// from these helm secrets, sort by name to get the most recent version
-	sort.Slice(helmSecrets, func(i, j int) bool {
-		return helmSecrets[i].Name > helmSecrets[j].Name
-	})
-
-	// now get the first item from that list, and pull out the helm secret data
-	// basically stealing this process from https://github.com/helm/helm/blob/4b18b19a5e0b11450b9dc92edc75bdd7891c1f4e/pkg/storage/driver/util.go
-	var rancherClusterID = ""
-	if data, ok := helmSecrets[0].Data["release"]; ok {
-		// take that data and base64 decode it
-
-		b, err := b64.DecodeString(string(data))
+	// now grab the annotation in the secret that contains the cluster id
+	labels := configmap.ObjectMeta.GetLabels()
+	rancherClusterID, ok := labels["management.cattle.io/cluster-name"]
+	if !ok {
+		// fall back to using the 'fleet-agent' secret
+		secret, err := kc.clientset.CoreV1().Secrets(namespace).Get(kc.ctx, fleetAgentSecretName, metav1.GetOptions{})
 		if err != nil {
 			return "", err
 		}
 
-		if len(b) > 3 && bytes.Equal(b[0:3], magicGzip) {
-
-			r, err := gzip.NewReader(bytes.NewReader(b))
-			if err != nil {
-				return "", err
-			}
-			defer r.Close()
-			b2, err := ioutil.ReadAll(r)
-			if err != nil {
-				return "", err
-			}
-			b = b2
+		// now grab the annotation in the secret that contains the cluster id
+		annotations := secret.ObjectMeta.GetAnnotations()
+		val, ok := annotations["field.cattle.io/projectId"]
+		if !ok {
+			return "", fmt.Errorf("rancher cluster id not found")
 		}
 
-		var rls types.Release
-		if err := json.Unmarshal(b, &rls); err != nil {
-			return "", err
-		}
-
-		// now locate the rancher cluster id in that helm release data
-
-		rancherClusterID = rls.Config.Global.Fleet.ClusterLabels.ClusterName
-
-	} else {
-		return "", fmt.Errorf("couldn't find key release in secret")
+		rancherClusterID = strings.Split(val, ":")[0]
 	}
 
 	if rancherClusterID == "" {
