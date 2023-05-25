@@ -189,6 +189,7 @@ func (kc *Kubeclient) GetClusterID() (string, error) {
 			if err != nil {
 				return "", err
 			}
+			return rancherClusterID, nil
 		}
 
 		rancherClusterID = strings.Split(val, ":")[0]
