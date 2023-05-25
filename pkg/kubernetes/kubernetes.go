@@ -1,9 +1,14 @@
 package kubernetes
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"sort"
 	"strings"
 
 	"github.com/ebauman/rancher-cluster-id-finder/pkg/types"
@@ -68,6 +73,83 @@ func buildKubeClient(kubeconfigFile string) (*kubernetes.Clientset, dynamic.Inte
 	return clientset, dynamic, ctx, err
 }
 
+func (kc *Kubeclient) getClusterIDFromChart() (string, error) {
+	// check to see if we're in the local cluster first
+	// this is indicated by the presence of a deployment/rancher in cattle-system namespace
+	if _, err := kc.clientset.AppsV1().Deployments(localNamespace).Get(kc.ctx, "rancher", metav1.GetOptions{}); err == nil {
+		return "local", nil
+	}
+
+	// first, let's check if the namespace we need is in existence (cattle-fleet-system)
+	_, err := kc.clientset.CoreV1().Namespaces().Get(kc.ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return "", err // _something_ went wrong, we don't really care what since it just means we can't go any further
+		// ( as opposed to detecting errors.IsNotFound() and handling that separately )
+	}
+
+	// we have the namespace, now let's get the secrets in that ns, but only the helm release kind
+	secrets, err := kc.clientset.CoreV1().Secrets(namespace).List(kc.ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", err
+	}
+
+	var helmSecrets = []v1.Secret{}
+	for _, s := range secrets.Items {
+		if s.Type == "helm.sh/release.v1" {
+			helmSecrets = append(helmSecrets, s)
+		}
+	}
+
+	// from these helm secrets, sort by name to get the most recent version
+	sort.Slice(helmSecrets, func(i, j int) bool {
+		return helmSecrets[i].Name > helmSecrets[j].Name
+	})
+
+	// now get the first item from that list, and pull out the helm secret data
+	// basically stealing this process from https://github.com/helm/helm/blob/4b18b19a5e0b11450b9dc92edc75bdd7891c1f4e/pkg/storage/driver/util.go
+	var rancherClusterID = ""
+	if data, ok := helmSecrets[0].Data["release"]; ok {
+		// take that data and base64 decode it
+
+		b, err := b64.DecodeString(string(data))
+		if err != nil {
+			return "", err
+		}
+
+		if len(b) > 3 && bytes.Equal(b[0:3], magicGzip) {
+
+			r, err := gzip.NewReader(bytes.NewReader(b))
+			if err != nil {
+				return "", err
+			}
+			defer r.Close()
+			b2, err := ioutil.ReadAll(r)
+			if err != nil {
+				return "", err
+			}
+			b = b2
+		}
+
+		var rls types.Release
+		if err := json.Unmarshal(b, &rls); err != nil {
+			return "", err
+		}
+
+		// now locate the rancher cluster id in that helm release data
+
+		rancherClusterID = rls.Config.Global.Fleet.ClusterLabels.ClusterName
+
+	} else {
+		return "", fmt.Errorf("couldn't find key release in secret")
+	}
+
+	if rancherClusterID == "" {
+		return "", fmt.Errorf("rancher cluster id not found")
+	}
+
+	return rancherClusterID, nil
+}
+
 func (kc *Kubeclient) GetClusterID() (string, error) {
 	// check to see if we're in the local cluster first
 	// this is indicated by the presence of a deployment/rancher in cattle-system namespace
@@ -102,7 +184,11 @@ func (kc *Kubeclient) GetClusterID() (string, error) {
 		annotations := secret.ObjectMeta.GetAnnotations()
 		val, ok := annotations["field.cattle.io/projectId"]
 		if !ok {
-			return "", fmt.Errorf("rancher cluster id not found")
+			// last ditch effort, try to get it from the chart secret
+			rancherClusterID, err = kc.getClusterIDFromChart()
+			if err != nil {
+				return "", err
+			}
 		}
 
 		rancherClusterID = strings.Split(val, ":")[0]
