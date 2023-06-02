@@ -3,7 +3,6 @@ package kubernetes
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 	"strings"
 
 	"github.com/ebauman/rancher-cluster-id-finder/pkg/types"
@@ -67,63 +66,97 @@ func buildKubeClient(kubeconfigFile string) (*kubernetes.Clientset, dynamic.Inte
 	return clientset, dynamic, ctx, err
 }
 
-func (kc *Kubeclient) GetClusterID() (string, error) {
-	// check to see if we're in the local cluster first
-	// this is indicated by the presence of a deployment/rancher in cattle-system namespace
-	if _, err := kc.clientset.AppsV1().Deployments(localNamespace).Get(kc.ctx, "rancher", metav1.GetOptions{}); err == nil {
-		return "local", nil
-	}
-
-	// first, let's check if the namespace we need is in existence (cattle-fleet-system)
-	_, err := kc.clientset.CoreV1().Namespaces().Get(kc.ctx, namespace, metav1.GetOptions{})
+func (kc *Kubeclient) GetClusterIDFromAnnotations() (string, bool) {
+	// first, let's check if the namespace we need is in existence (cattle-impersonation-system)
+	_, err := kc.clientset.CoreV1().Namespaces().Get(kc.ctx, impersonationNamespace, metav1.GetOptions{})
 	if err != nil {
-		return "", err // _something_ went wrong, we don't really care what since it just means we can't go any further
+		return "", false // _something_ went wrong, we don't really care what since it just means we can't go any further
 		// ( as opposed to detecting errors.IsNotFound() and handling that separately )
 	}
 
-	// we have the namespace, grab the "fleet-agent" secret
-	configmap, err := kc.clientset.CoreV1().ConfigMaps(namespace).Get(kc.ctx, fleetAgentConfigMapName, metav1.GetOptions{})
+	secrets, err := kc.clientset.CoreV1().Secrets(impersonationNamespace).List(kc.ctx, metav1.ListOptions{})
 	if err != nil {
-		return "", err
+		return "", false
+	}
+
+	for _, secret := range secrets.Items {
+		annotations := secret.ObjectMeta.GetAnnotations()
+		val, ok := annotations["field.cattle.io/projectId"]
+		if ok {
+			rancherClusterID := strings.Split(val, ":")[0]
+			return rancherClusterID, true
+		}
+	}
+
+	return "", false
+
+}
+
+func (kc *Kubeclient) CheckLocalCluster() (string, bool) {
+	// check to see if we're in the local cluster first
+	// this is indicated by the presence of a deployment/rancher in cattle-system namespace
+	if _, err := kc.clientset.AppsV1().Deployments(localNamespace).Get(kc.ctx, "rancher", metav1.GetOptions{}); err == nil {
+		return "local", true
+	}
+
+	return "", false
+}
+
+func (kc *Kubeclient) GetClusterIDFromSecret() (string, bool) {
+	// first, let's check if the namespace we need is in existence (cattle-fleet-system)
+	_, err := kc.clientset.CoreV1().Namespaces().Get(kc.ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return "", false // _something_ went wrong, we don't really care what since it just means we can't go any further
+		// ( as opposed to detecting errors.IsNotFound() and handling that separately )
+	}
+
+	secret, err := kc.clientset.CoreV1().Secrets(namespace).Get(kc.ctx, fleetAgentSecretName, metav1.GetOptions{})
+	if err != nil {
+		return "", false
 	}
 
 	// now grab the annotation in the secret that contains the cluster id
+	annotations := secret.ObjectMeta.GetAnnotations()
+	val, ok := annotations["field.cattle.io/projectId"]
+	if !ok {
+		return "", false
+	}
+
+	rancherClusterID := strings.Split(val, ":")[0]
+
+	if rancherClusterID == "" {
+		return "", false
+	}
+
+	return rancherClusterID, true
+}
+
+func (kc *Kubeclient) GetClusterIDFromConfigMap() (string, bool) {
+	// first, let's check if the namespace we need is in existence (cattle-fleet-system)
+	_, err := kc.clientset.CoreV1().Namespaces().Get(kc.ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return "", false // _something_ went wrong, we don't really care what since it just means we can't go any further
+		// ( as opposed to detecting errors.IsNotFound() and handling that separately )
+	}
+
+	// we have the namespace, grab the "fleet-agent" configmap
+	configmap, err := kc.clientset.CoreV1().ConfigMaps(namespace).Get(kc.ctx, fleetAgentConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return "", false
+	}
+
+	// now grab the label in the configmap that contains the cluster id
 	labels := configmap.ObjectMeta.GetLabels()
 	rancherClusterID, ok := labels["management.cattle.io/cluster-name"]
 	if !ok {
-		// fall back to using the 'fleet-agent' secret
-		secret, err := kc.clientset.CoreV1().Secrets(namespace).Get(kc.ctx, fleetAgentSecretName, metav1.GetOptions{})
-		if err != nil {
-			return "", err
-		}
-
-		// now grab the annotation in the secret that contains the cluster id
-		annotations := secret.ObjectMeta.GetAnnotations()
-		val, ok := annotations["field.cattle.io/projectId"]
-		if !ok {
-			secrets, err := kc.clientset.CoreV1().Secrets(impersonationNamespace).List(kc.ctx, metav1.ListOptions{})
-			if err != nil {
-				return "", err
-			}
-
-			for _, secret := range secrets.Items {
-				annotations := secret.ObjectMeta.GetAnnotations()
-				val, ok := annotations["field.cattle.io/projectId"]
-				if ok {
-					rancherClusterID = strings.Split(val, ":")[0]
-					return rancherClusterID, nil
-				}
-			}
-		}
-
-		rancherClusterID = strings.Split(val, ":")[0]
+		return "", false
 	}
 
 	if rancherClusterID == "" {
-		return "", fmt.Errorf("rancher cluster id not found")
+		return "", false
 	}
 
-	return rancherClusterID, nil
+	return rancherClusterID, true
 }
 
 func (kc *Kubeclient) GetRancherURL() (string, error) {
