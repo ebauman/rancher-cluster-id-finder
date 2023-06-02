@@ -3,13 +3,12 @@ package kubernetes
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 
-	"github.com/ebauman/rancher-cluster-id-finder/pkg/types"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -21,6 +20,7 @@ var (
 	impersonationNamespace  = "cattle-impersonation-system"
 	localNamespace          = "cattle-system"
 	fleetAgentSecretName    = "fleet-agent"
+	cattleAgentDeployName   = "cattle-cluster-agent"
 	fleetAgentConfigMapName = "fleet-agent"
 	b64                     = base64.StdEncoding
 )
@@ -181,25 +181,19 @@ func (kc *Kubeclient) GetRancherURL() (string, error) {
 		}
 	}
 
-	// first, let's check if the namespace we need is in existence
-	_, err = kc.clientset.CoreV1().Namespaces().Get(kc.ctx, namespace, metav1.GetOptions{})
+	// we have the namespace, now let's get the cattle-cluster-agent deployment
+	deployment, err := kc.clientset.AppsV1().Deployments(localNamespace).Get(kc.ctx, cattleAgentDeployName, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
 
-	// we have the namespace, now let's get the fleet-agent configuration secret
-	secret, err := kc.clientset.CoreV1().Secrets(namespace).Get(kc.ctx, fleetAgentSecretName, metav1.GetOptions{})
-	if err != nil {
-		return "", err
+	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "CATTLE_SERVER" {
+			return env.Value, nil
+		}
 	}
 
-	var kubeconfig types.Kubeconfig
-	err = yaml.Unmarshal(secret.Data["kubeconfig"], &kubeconfig)
-	if err != nil {
-		return "", err
-	}
-
-	return kubeconfig.Clusters[0].Cluster.Server, nil
+	return "", fmt.Errorf("Could not get Rancher URL")
 }
 
 func (kc *Kubeclient) WriteConfigMap(value string,
