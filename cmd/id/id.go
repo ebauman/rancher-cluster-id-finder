@@ -17,9 +17,19 @@ var IdCmd = &cobra.Command{
 			return err
 		}
 
-		rancherClusterId, err := kc.GetClusterID()
-		if err != nil {
-			return err
+		rancherClusterId, valid := kc.CheckLocalCluster()
+		if ! valid {
+			rancherClusterId, valid = kc.GetClusterIDFromConfigMap()
+			if ! valid {
+				rancherClusterId, valid = kc.GetClusterIDFromSecret()
+				if ! valid {
+					rancherClusterId, valid = kc.GetClusterIDFromAnnotations()
+				}
+			}
+		}
+
+		if ! valid {
+			return fmt.Errorf("ERROR: Could not get Cluster ID.")
 		}
 
 		if flags.ConfigMapName != "" {
